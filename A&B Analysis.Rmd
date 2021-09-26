@@ -1,0 +1,257 @@
+---
+title: "A&B Co. Analysis"
+author: "Will Massey"
+date: "9/26/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# The prompt
+
+You’re a Data Scientist / Business Analyst working for a new eCommerce company called A&B Co. (similar to Amazon) and you’ve been asked to prepare a presentation for the Vice President of Sales and the Vice President of Operations that summarizes sales and operations thus far. The summary should include (at a minimum) a summary of current state the business, current customer satisfaction, and a proposal of 2-3 areas where the company can improve.
+
+#### Here are some facts:
+
+* It’s currently September 2018 (e.g., you can ignore all data after September 2018)  
+* The company’s inception was January 2017 (so you can ignore all data before January 2017)  
+* Company is US-based, but launched in Brazil (which is why some information is in Portuguese)  
+* You can assume all orders are delivered (so ignore the order state field)  
+
+# Cleaning / Joining Data for Analysis
+
+
+```{r imports, message=FALSE, warning=FALSE}
+
+# importing packages 
+library(tidyverse)
+library(skimr)
+library(scales)
+library(rapportools, include.only = 'is.empty')
+library(ggpubr)
+library(reshape2)
+library(lubridate)
+
+```
+
+```{r clean}
+
+# reading in files
+customers = read.csv("raw_data/olist_customers_dataset.csv")
+orders = read.csv("raw_data/olist_orders_dataset.csv")
+reviews = read.csv("raw_data/olist_order_reviews_dataset.csv")
+payments = read.csv("raw_data/olist_order_payments_dataset.csv")
+products = read.csv("raw_data/olist_products_dataset.csv")
+order_items = read.csv("raw_data/olist_order_items_dataset.csv")
+english_names = read.csv("raw_data/product_category_name_translation.csv")
+
+# creating and cleaning transactions table 
+transactions = inner_join(orders, payments, by = "order_id")
+transactions = distinct(transactions) %>% mutate(order_date = as.Date(strptime(transactions$order_purchase_timestamp, "%Y-%m-%d"))) %>%
+  mutate(delivery_date = as.Date(strptime(transactions$order_delivered_customer_date, "%Y-%m-%d")))
+
+# cleaning reviews table
+reviews = distinct(reviews) %>% mutate(Date = as.Date(strptime(reviews$review_creation_date, "%Y-%m-%d")))
+
+# giving translations to category names
+products = inner_join(products, english_names, by = "product_category_name")
+
+# filtering data to be between the dates and January 2017 September 2018 as specified above
+transactions = subset(transactions, order_date > as.Date("2017-01-01") && order_date < as.Date("2018-09-30"))
+reviews = subset(reviews, Date > as.Date("2017-01-01") && Date < as.Date("2018-09-30"))
+
+```
+
+# Summary of Operations
+
+We will begin by plotting the total sales by date in order to gain insights on how well the service is performing and visualize the company's growth from inception to the present.
+
+
+```{r fig.height=8, fig.width=10}
+
+sales = transactions %>% group_by(order_date) %>% summarise_at(vars("payment_value"), sum) %>%
+  rename(sum_payments = payment_value)
+  
+ggplot(data = sales, aes(x=order_date, y=sum_payments)) + geom_line(color="blue") +
+  labs(title = "Summary of Sales Over Time", x = "Date", y = "Sales",
+       subtitle = paste0("Total Daily Sales: $", toString(round(mean(sales$sum_payments), digits = 2))))
+  
+
+```
+With a somewhat slow start, the company gains more income through payments as time continues forward. However there is an inactive period toward the end of our time frame that could require a deeper investigation.
+
+Now we will plot the number of unique users who use the service on a monthly basis.
+
+```{r fig.height=8, fig.width=10, message=FALSE, warning=FALSE}
+
+unique_users = transactions %>% mutate(month = format(order_date, "%m"), year = format(order_date, "%Y")) %>% 
+  group_by(year, month)  %>% summarise(unique_users = n_distinct(customer_id)) %>% mutate(date = my(paste0(month, "-", year)))
+
+ggplot(data = unique_users, aes(x=date, y=unique_users, fill=date)) + geom_bar(stat="identity") + 
+  scale_x_date(date_breaks = "months" , date_labels = "%b-%y") + 
+  labs(title = "Number of Unique Users per Month", x = "Date", y = "Number of Unique Users",
+       fill = "Date",
+       caption = paste0("Average Monthly Unique Users: ", toString(round(mean(unique_users$unique_users), digits = 2)))) + 
+  theme(axis.text.x = element_text(angle = 45)) 
+
+```
+
+Similar to above, after a slow period, the number of unique users per month increased as time moves forward. 
+
+Next, let's gain some insight on how much each product category has brought in from payments. First we will plot the total of all sales by each category.
+
+```{r fig.height=8, fig.width=10}
+# joining tables to see payments by category
+payments_by_department_total = inner_join(order_items, products, by = "product_id")
+payments_by_department_total = inner_join(distinct(payments_by_department_total), reviews, by = "order_id")
+payments_by_department_total = inner_join(payments_by_department_total, payments, by = "order_id")
+
+# aggregating data to show average order price by category
+payments_by_department_total = payments_by_department_total %>% group_by(product_category_name_english) %>% summarise_at(vars(payment_value), sum) %>%
+  arrange(desc(payment_value)) %>% rename(category = product_category_name_english)
+
+# melting data to visualize better
+payments_by_department_total = melt(payments_by_department_total, id.vars="category")
+
+total_sales = sum(payments_by_department_total$value)
+ggplot(data = payments_by_department_total, aes(x=reorder(category, value), y=value, fill=value)) + geom_bar(stat="identity", color="black") +
+  labs(title = "Total Sales by Category", x = "Category", y = "Total of Sales",
+       fill = "Sales",
+       caption = paste0("Total of all Sales: $", total_sales)) + 
+  theme(axis.text.x = element_text(angle = 0)) + coord_flip()
+
+```
+It appears that the bed/bath/table category has the most sales in the company's history, followed by the health and beauty category.  
+
+Similarly, we will now plot average sales per order for each category.
+
+```{r echo=FALSE, fig.height=8, fig.width=10}
+# joining tables to see payments by category
+payments_by_department_avg = inner_join(order_items, products, by = "product_id")
+payments_by_department_avg = inner_join(distinct(payments_by_department_avg), reviews, by = "order_id")
+payments_by_department_avg = inner_join(payments_by_department_avg, payments, by = "order_id")
+
+# aggregating data to show average order price by category
+payments_by_department_avg = payments_by_department_avg %>% group_by(product_category_name_english) %>% summarise_at(vars(payment_value), mean) %>%
+  arrange(desc(payment_value)) %>% rename(category = product_category_name_english)
+
+# melting data to visualize better
+payments_by_department_avg = melt(payments_by_department_avg, id.vars="category")
+
+avg_sales = round(mean(payments_by_department_avg$value), digits = 2)
+ggplot(data = payments_by_department_avg, aes(x=reorder(category, value), y=value, fill=value)) + geom_bar(stat="identity", color="black") +
+  labs(title = "Average Sales by Category", x = "Category", y = "Average Price of Sales",
+       fill = "Sales",
+       caption = paste0("Average Sales by Order: $", avg_sales)) + 
+  theme(axis.text.x = element_text(angle = 0)) + coord_flip()
+
+```
+
+Computers, telephones, and small appliances take the lead with the highest average for order price.  
+
+Moving on, we would now like to find out how the customers feel about the services and goods provided by visualizing customer reviews. We will begin by graphing the percentages of review ratings.
+
+```{r fig.height=8, fig.width=10}
+
+review_totals = reviews %>% count(review_score) %>% ungroup() %>% 
+  mutate(percent = percent(n / sum(n))) %>% rename(total = n)
+
+ggplot(review_totals, aes(x="", y=total, fill=factor(review_score))) + 
+  geom_bar(width = 1, stat="identity") + coord_polar("y", start=0) + 
+  geom_text(aes(label = paste0("Rating: ", review_score, ", ", percent, " of total.")), position = position_stack(vjust = 0.5)) + 
+  theme_void() + 
+  scale_fill_brewer(palette = "PuBu") + 
+  labs(title = "Percentages of Reviews", fill = "Rating", 
+       subtitle = paste0("Average Rating: ", toString(round((mean(reviews$review_score)), digits=2))))
+  
+```
+
+As we can see, overall customers are fairly satisfied with the products and services provided. However, there are more 1 star ratings compared to 2 star or 3 star ratings. In order to gain some insight into customers' problems, we will display a few 1 star review titles. 
+
+```{r}
+
+bad_reviews = subset(reviews, review_score == 1)
+bad_reviews_with_title = subset(bad_reviews, is.empty(review_comment_title) == FALSE)
+bad_reviews_with_title$review_comment_title[1:50]
+```
+
+Upon using Google Translate and a much deeper inspection of the reviews, most of the users are experiencing delayed deliveries or not receiving products they purchased. We can now calculate the average wait for all 1 star reviews and compare them to the average wait for all orders.
+
+```{r echo=FALSE}
+# one star ratings
+bad_transactions = inner_join(transactions, bad_reviews, by = "order_id")
+bad_transactions = drop_na(bad_transactions, delivery_date)
+avg_wait_1star = as.double(round(mean(bad_transactions$delivery_date - bad_transactions$order_date), digits = 1))
+
+# all transactions
+all_transactions = transactions %>% drop_na(delivery_date)
+avg_wait_all = as.double(round(mean(all_transactions$delivery_date - all_transactions$order_date), digits = 1))
+
+print(paste0("Average delivery time for all users: ", avg_wait_all, " days."))
+print(paste0("Average delivery time for users who gave 1 star: ", avg_wait_1star, " days."))
+```
+
+That is almost a nine day difference. One of A&B Co's focuses should be prioritizing quicker deliveries to increase overall customer satisfaction, as well as making sure all products ordered by the customer reach them. This will lead to better reviews, recurring customers, and overall more income for the company. 
+
+Next let's go into more detail about which departments are getting the best and worst ratings.
+
+```{r fig.height=8, fig.width=10, message=FALSE, warning=FALSE}
+
+# joining tables to get rating by department
+reviews_by_department = inner_join(order_items, products, by = "product_id")
+reviews_by_department = inner_join(distinct(reviews_by_department), reviews, by = "order_id")
+
+# aggregating to calculate average rating per category
+reviews_by_department = reviews_by_department %>% group_by(product_category_name_english) %>% summarise_at(vars("review_score"), mean) %>% arrange(desc(review_score)) %>% rename(category = product_category_name_english)
+reviews_by_department$review_score = round(reviews_by_department$review_score, digits = 2)
+
+# melting dataframe to visualize
+reviews_by_department = melt(reviews_by_department, id.vars="category")
+
+ggplot(data = reviews_by_department, aes(x=reorder(category, value), y=value, fill=value)) + geom_bar(stat="identity", color="black") +
+  labs(title = "Categorys by Rating", x = "Category", y = "Average Rating",
+       fill = "Rating") + 
+  theme(axis.text.x = element_text(angle = 0)) + coord_flip() + scale_color_brewer(palette="Dark2")
+
+```
+
+As we can see, the musical CDs/DVDs and children's fashion clothes have scored the best ratings, whereas security/services and diapers/hygiene have scored the lowest ratings. This is a good opportunity to focus on the lower rated categories to increase overall user satisfaction, as well as building on the higher rated categories to bolster sales and continue to bring a great service to users.  
+
+We will move on to find out whether or not customers are returning after their first order and also see whether or not recurring customers spend more than first time users. Graphing the number of times a user has used the service and the total amount they have spent, we will be able to see if there is any statistical relationship between the two factors. 
+
+```{r message=FALSE, warning=FALSE}
+
+customer_info = transactions %>% group_by(customer_id) %>% tally() %>% rename(num_occurances = n)
+tmp = transactions %>% group_by(customer_id) %>% summarise(total_payment = sum(payment_value))
+customer_info = inner_join(customer_info, tmp, by = "customer_id")
+
+ggscatter(customer_info, x = "num_occurances", y = "total_payment",
+          add = "reg.line", conf.int = TRUE,
+          add.params = list(color="blue", fill="lightgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          title = "Relationship of Times Shopped to Total Spent",
+          xlab = "Times Shopped", 
+          ylab = "Total Spent")
+
+```
+
+There appears to be no correlation between times shopped and the amount of payments users have made. However, with a high p value, this is not statistically significant and is not representative of the entire population. Still though, we can visually see most of the income made from payments has been from users who only use the site once or twice. This insight could give actionable results if applied correctly. 
+
+
+# Recommendations: 
+
+* Bed, bath, and beauty products, as well as computer accessories and furniture sell the most out of all the other product categories. Also, computers, telephones, and small appliances have the highest price per order as compared to the other product categories. If advertising campaigns were started, it would be most helpful to focus these areas first.
+
+* Users are fairly satisfied with the services and products they receive. However the number of 1 star reviews outweighs the number of 2 and 3 star reviews, bringing the average review score down. It was revealed the some users are experiencing long delivery times while others aren't receiving all of the products that they ordered. To increase overall customer satisfaction, it would be wise to investigate the causes of the delayed deliveries, as well as making sure sellers are double checking their packages to ensure every item the customer ordered is included within it.
+
+* Sales increase as time moves forward, however stakeholders will need to investigate the cause of the inactive period toward the end of the end of the given time frame. This could be anything from servers being offline and users being unable to use the service or losing a partnership with a shipping company and not being able to take/ship orders.
+
+* There is no correlation between the amount of times a customer has used the service and the total amount they have spent using it, however most of the income made from sales has been from users who have only used the service once. This insight tells us something is stopping customers from returning to the service. Giving users an incentive for returning could help customers return to the service. Also, a more detailed customer satisfaction survey could be used to gain more valuable insights. Ask the customer questions like: How satisfied were you with your purchase? Were you satisfied with the speed of your delivery? Did you receive all the products you ordered? Were your products damaged upon delivery? How likely are you to use this service again? Is there anything else you would like to add? 
+
+
+
+
+
